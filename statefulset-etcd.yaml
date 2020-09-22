@@ -1,0 +1,202 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: app-etcd-cluster
+  labels:
+    k8s-app: app-etcd-cluster
+    app: etcd
+  namespace: default
+spec:
+  serviceName: app-etcd-cluster
+  replicas: 3
+  selector:
+    matchLabels:
+      k8s-app: app-etcd-cluster
+      app: etcd
+  template:
+    metadata:
+      name: app-etcd-cluster
+      labels:
+        k8s-app: app-etcd-cluster
+        app: etcd
+    spec:
+      containers:
+      - name: app-etcd-cluster
+        image: registry.aliyuncs.com/google_containers/etcd:3.3.17
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 2380
+          name: peer
+        - containerPort: 2379
+          name: client
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        env:
+        - name: INITIAL_CLUSTER_SIZE
+          value: "3"
+        - name: CLUSTER_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: ETCDAPI_VERSION
+          value: "3"
+        - name: SET_NAME
+          value: "portal-etcd-cluster"
+        - name: GOMAXPROCS
+          value: "2"
+        volumeMounts:
+        - mountPath: /var/run/etcd
+          name: datadir
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -ec
+              - |
+                HOSTNAME=$(hostname)
+
+                member_hash() {
+                    etcdctl member list | grep http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380 | cut -d':' -f1 | cut -d'[' -f1
+                }
+
+                eps() {
+                    EPS=""
+                    for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                        EPS="${EPS}${EPS:+,}http://${SET_NAME}-${i}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2379"
+                    done
+                    echo ${EPS}
+                }
+
+                export ETCDCTL_ENDPOINTS=$(eps)
+
+                SET_ID=${HOSTNAME##*-}
+                # Removing member from cluster
+                if [ "${SET_ID}" -ge ${INITIAL_CLUSTER_SIZE} ]; then
+                    echo "Removing ${HOSTNAME} from etcd cluster"
+                    if [ "${ETCDAPI_VERSION}" -eq 3 ]; then
+                        ETCDCTL_API=3 etcdctl member remove $(member_hash)
+                    else
+                        etcdctl member remove $(member_hash)
+                    fi
+                    if [ $? -eq 0 ]; then
+                        # Remove everything otherwise the cluster will no longer scale-up
+                        rm -rf /var/run/etcd/*
+                    fi
+                fi
+        command:
+        - /bin/sh
+        - -ec
+        - |
+          HOSTNAME=$(hostname)
+          echo "etcd api version is ${ETCDAPI_VERSION}"
+
+          eps() {
+              EPS=""
+              for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                  EPS="${EPS}${EPS:+,}http://${SET_NAME}-${i}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2379"
+              done
+              echo ${EPS}
+          }
+
+          member_hash() {
+              etcdctl member list | grep http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380 | cut -d':' -f1 | cut -d'[' -f1
+          }
+
+          # etcd-SET_ID
+          SET_ID=${HOSTNAME##*-}
+          # adding a new member to existing cluster (assuming all initial pods are available)
+          if [ "${SET_ID}" -ge ${INITIAL_CLUSTER_SIZE} ]; then
+              export ETCDCTL_ENDPOINTS=$(eps)
+
+              # member already added?
+              MEMBER_HASH=$(member_hash)
+              if [ -n "${MEMBER_HASH}" ]; then
+                  # the member hash exists but for some reason etcd failed
+                  # as the datadir has not be created, we can remove the member
+                  # and retrieve new hash
+                  if [ "${ETCDAPI_VERSION}" -eq 3 ]; then
+                      ETCDCTL_API=3 etcdctl  member remove ${MEMBER_HASH}
+                  else
+                      etcdctl member remove ${MEMBER_HASH}
+                  fi
+                  
+              fi
+              echo "Adding new member"
+              rm -rf /var/run/etcd/*
+              # ensure etcd dir exist
+              mkdir -p /var/run/etcd/
+              # sleep 60s wait endpoint become ready
+              echo "sleep 30s wait endpoint become ready,sleeping..."
+              sleep 30
+
+              if [ "${ETCDAPI_VERSION}" -eq 3 ]; then
+                  ETCDCTL_API=3 etcdctl  member add ${HOSTNAME} --peer-urls=http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380 | grep "^ETCD_" > /var/run/etcd/new_member_envs
+              else
+                  etcdctl member add ${HOSTNAME} http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380 | grep "^ETCD_" > /var/run/etcd/new_member_envs
+              fi
+
+              if [ $? -ne 0 ]; then
+                  echo "member add ${HOSTNAME} error."
+                  rm -f /var/run/etcd/new_member_envs
+                  exit 1
+              fi
+              # ETCD_NAME="portal-etcd-cluster-3"
+              # ETCD_INITIAL_CLUSTER="infra-etcd-cluster-3=http://infra-etcd-cluster-3.infra-etcd-cluster.default.svc.cluster.local:2380,infra-etcd-cluster-1=http://infra-etcd-cluster-1.infra-etcd-cluster.default.svc.cluster.local:2380,infra-etcd-cluster-0=http://infra-etcd-cluster-0.infra-etcd-cluster.default.svc.cluster.local:2380,infra-etcd-cluster-2=http://infra-etcd-cluster-2.infra-etcd-cluster.default.svc.cluster.local:2380"
+              # ETCD_INITIAL_CLUSTER_STATE="existing"
+
+              cat /var/run/etcd/new_member_envs
+              source /var/run/etcd/new_member_envs
+
+              exec etcd --name ${HOSTNAME} \
+                  --listen-peer-urls http://0.0.0.0:2380 \
+                  --listen-client-urls http://0.0.0.0:2379 \
+                  --advertise-client-urls http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2379 \
+                  --initial-advertise-peer-urls http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380 \
+                  --data-dir /var/run/etcd/default.etcd \
+                  --initial-cluster ${ETCD_INITIAL_CLUSTER} \
+                  --initial-cluster-state ${ETCD_INITIAL_CLUSTER_STATE}
+          fi
+          for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+              while true; do
+                  echo "Waiting for ${SET_NAME}-${i}.${SET_NAME}.${CLUSTER_NAMESPACE} to come up"
+                  ping -W 1 -c 1 ${SET_NAME}-${i}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local > /dev/null && break
+                  sleep 1s
+              done
+          done
+
+          echo "join member ${HOSTNAME}"
+          initial_peers() {
+                PEERS=""
+                for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                PEERS="${PEERS}${PEERS:+,}${SET_NAME}-${i}=http://${SET_NAME}-${i}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380"
+                done
+                echo ${PEERS}
+          }
+          # join member
+          exec etcd --name ${HOSTNAME} \
+              --listen-peer-urls http://0.0.0.0:2380 \
+              --listen-client-urls http://0.0.0.0:2379 \
+              --initial-advertise-peer-urls http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380 \
+              --advertise-client-urls http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2379 \
+              --initial-cluster-token portal-etcd-cluster \
+              --initial-cluster $(initial_peers) \
+              --initial-cluster-state new \
+              --data-dir /var/run/etcd/default.etcd 
+      imagePullSecrets:
+      - name: app-docker-image-registry
+  updateStrategy:
+    type: OnDelete
+  volumeClaimTemplates:
+  - metadata:
+      name: datadir
+    spec:
+      accessModes:
+        - "ReadWriteOnce"
+      storageClassName: alicloud-nas-subpath
+      resources:
+        requests:
+          # upstream recommended max is 700M
+          storage: 1Gi
