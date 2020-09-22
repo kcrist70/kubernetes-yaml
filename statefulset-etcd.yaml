@@ -43,7 +43,7 @@ spec:
         - name: ETCDAPI_VERSION
           value: "3"
         - name: SET_NAME
-          value: "portal-etcd-cluster"
+          value: "app-etcd-cluster"
         - name: GOMAXPROCS
           value: "2"
         volumeMounts:
@@ -143,7 +143,8 @@ spec:
                   rm -f /var/run/etcd/new_member_envs
                   exit 1
               fi
-              # ETCD_NAME="portal-etcd-cluster-3"
+              # cat /var/run/etcd/new_member_envs 
+              # ETCD_NAME="infra-etcd-cluster-3"
               # ETCD_INITIAL_CLUSTER="infra-etcd-cluster-3=http://infra-etcd-cluster-3.infra-etcd-cluster.default.svc.cluster.local:2380,infra-etcd-cluster-1=http://infra-etcd-cluster-1.infra-etcd-cluster.default.svc.cluster.local:2380,infra-etcd-cluster-0=http://infra-etcd-cluster-0.infra-etcd-cluster.default.svc.cluster.local:2380,infra-etcd-cluster-2=http://infra-etcd-cluster-2.infra-etcd-cluster.default.svc.cluster.local:2380"
               # ETCD_INITIAL_CLUSTER_STATE="existing"
 
@@ -181,7 +182,7 @@ spec:
               --listen-client-urls http://0.0.0.0:2379 \
               --initial-advertise-peer-urls http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2380 \
               --advertise-client-urls http://${HOSTNAME}.${SET_NAME}.${CLUSTER_NAMESPACE}.svc.cluster.local:2379 \
-              --initial-cluster-token portal-etcd-cluster \
+              --initial-cluster-token app-etcd-cluster \
               --initial-cluster $(initial_peers) \
               --initial-cluster-state new \
               --data-dir /var/run/etcd/default.etcd 
