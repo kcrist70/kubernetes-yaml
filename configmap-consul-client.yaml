@@ -1,0 +1,14 @@
+# Source: ack-consul/templates/client-config-configmap.yaml
+# ConfigMap with extra configuration specified directly to the chart
+# for client agents only.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-consul-client-config
+  namespace: test
+  labels:
+    app: consul
+    project: test
+data:
+  extra-from-values.json: |-
+    {}
