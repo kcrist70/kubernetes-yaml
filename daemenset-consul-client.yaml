@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: consul
+  namespace: test
+  labels:
+    component: client
+    project: test
+    app: consul
+spec:
+  selector:
+    matchLabels:
+      app: consul
+      project: test
+      component: client
+      hasDNS: "true"
+  template:
+    metadata:
+      labels:
+        app: consul
+        project: test
+        component: client
+        hasDNS: "true"
+      annotations:
+        "consul.hashicorp.com/connect-inject": "false"
+    spec:
+      terminationGracePeriodSeconds: 10
+      tolerations:
+      - key: "network"
+        operator: "Equal"
+        value: "whiteIP"
+        effect: "NoSchedule"
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: test-consul-client-config
+        - hostPath:
+            path: /etc/localtime
+            type: ''
+          name: volume-localtime
+
+      containers:
+        - name: consul
+          image: "consul:1.4.4"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - "/bin/sh"
+            - "-ec"
+            - |
+              CONSUL_FULLNAME="consul"
+
+              exec /bin/consul agent \
+                -node="${NODE}" \
+                -advertise="${POD_IP}" \
+                -bind=0.0.0.0 \
+                -client=0.0.0.0 \
+                -config-dir=/consul/config \
+                -datacenter=dc1 \
+                -data-dir=/consul/data \
+                -retry-join=${CONSUL_FULLNAME}-server-0.${CONSUL_FULLNAME}-server.${NAMESPACE}.svc \
+                -retry-join=${CONSUL_FULLNAME}-server-1.${CONSUL_FULLNAME}-server.${NAMESPACE}.svc \
+                -retry-join=${CONSUL_FULLNAME}-server-2.${CONSUL_FULLNAME}-server.${NAMESPACE}.svc \
+                -domain=cluster.local
+          volumeMounts:
+            - name: data
+              mountPath: /consul/data
+            - name: config
+              mountPath: /consul/config
+            - mountPath: /etc/localtime
+              name: volume-localtime
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - consul leave
+          ports:
+            - name: http
+              containerPort: 8500
+            - name: serflan-tcp
+              containerPort: 8301
+              protocol: "TCP"
+            - name: serflan-udp
+              containerPort: 8301
+              protocol: "UDP"
+            - name: server
+              containerPort: 8300
+          readinessProbe:
+            exec:
+              command:
+                - "/bin/sh"
+                - "-ec"
+                - |
+                  curl http://127.0.0.1:8500/v1/status/leader 2>/dev/null | \
+                  grep -E '".+"'
