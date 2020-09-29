@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: consul
+  namespace: test
+  labels:
+    component: client
+    project: test
+    app: consul
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: 8500
+      targetPort: 8500
+    - name: serflan-tcp
+      protocol: "TCP"
+      port: 8301
+      targetPort: 8301
+    - name: serflan-udp
+      protocol: "UDP"
+      port: 8301
+      targetPort: 8301
+    - name: server
+      port: 8300
+      targetPort: 8300
+  selector:
+    app: consul
+    project: test
+    component: client
