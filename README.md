@@ -6,7 +6,7 @@
     - statefulset模式依赖service，必须先启动service
 3. kubectl apply -f statefulset-etcd.yaml
     - 部署etcd， yaml内的启动命令会先检查集群状态，并添加节点.最小集群数为3个.
-#部署consul集群，server and client：
+# 部署consul集群，server and client：
 1. 启动service-consul-server.yaml
 2. 启动service-consul-client.yaml
 3. 启动statefulset-consul-server.yaml
