@@ -1,0 +1,140 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: consul-server
+  namespace: portal-prod
+  labels:
+    component: server
+    project: portal-prod
+    app: consul
+spec:
+  serviceName: consul-server
+  podManagementPolicy: Parallel
+  replicas: 3
+  selector:
+    matchLabels:
+      app: consul
+      project: portal-prod
+      component: server
+      hasDNS: "true"
+  template:
+    metadata:
+      labels:
+        app: consul
+        project: portal-prod
+        component: server
+        hasDNS: "true"
+      annotations:
+        "consul.hashicorp.com/connect-inject": "false"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: consul
+                  project: portal-prod
+                  component: server
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        fsGroup: 1000
+      volumes:
+        - name: config
+          configMap:
+            name: portal-prod-consul-server-config
+        - hostPath:
+            path: /etc/localtime
+            type: ''
+          name: volume-localtime
+      containers:
+        - name: consul
+          image: "consul:1.4.4"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          command:
+            - "/bin/sh"
+            - "-ec"
+            - |
+              CONSUL_FULLNAME="consul-server"
+
+              exec /bin/consul agent \
+                -advertise="${POD_IP}" \
+                -bind=0.0.0.0 \
+                -bootstrap-expect=3 \
+                -client=0.0.0.0 \
+                -config-dir=/consul/config \
+                -datacenter=dc1 \
+                -data-dir=/consul/data \
+                -domain=cluster.local \
+                -hcl="connect { enabled = true }" \
+                -ui \
+                -retry-join=${CONSUL_FULLNAME}-0.${CONSUL_FULLNAME} \
+                -retry-join=${CONSUL_FULLNAME}-1.${CONSUL_FULLNAME} \
+                -retry-join=${CONSUL_FULLNAME}-2.${CONSUL_FULLNAME} \
+                -server
+          volumeMounts:
+            - name: data
+              mountPath: /consul/data
+            - name: config
+              mountPath: /consul/config
+            - mountPath: /etc/localtime
+              name: volume-localtime
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - consul leave
+          ports:
+            - name: http
+              containerPort: 8500
+            - name: serflan-tcp
+              containerPort: 8301
+              protocol: "TCP"
+            - name: serflan-udp
+              containerPort: 8301
+              protocol: "UDP"
+            - name: serfwan-tcp
+              containerPort: 8302
+              protocol: "TCP"
+            - name: serfwan-udp
+              containerPort: 8302
+              protocol: "UDP"
+            - name: server
+              containerPort: 8300
+          readinessProbe:
+            # NOTE(mitchellh): when our HTTP status endpoints support the
+            # proper status codes, we should switch to that. This is temporary.
+            exec:
+              command:
+                - "/bin/sh"
+                - "-ec"
+                - |
+                  curl http://127.0.0.1:8500/v1/status/leader 2>/dev/null | \
+                  grep -E '".+"'
+            failureThreshold: 2
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        annotations:
+          volume.alpha.kubernetes.io/storage-class: anything
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: alicloud-nas-subpath
+        resources:
+          requests:
+            storage: 10Gi
