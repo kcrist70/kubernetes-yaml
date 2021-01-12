@@ -1,0 +1,216 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  labels:
+    k8s-app: portal-etcd-cluster
+    app: etcd
+  namespace: portal-prod
+spec:
+  serviceName: etcd
+  podManagementPolicy: Parallel
+  replicas: 3
+  selector:
+    matchLabels:
+      k8s-app: portal-etcd-cluster
+      app: etcd
+  template:
+    metadata:
+      name: etcd
+      labels:
+        k8s-app: portal-etcd-cluster
+        app: etcd
+    spec:
+      containers:
+      - name: etcd
+        image: 'etcd:v3.3'
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 2280
+          name: peer
+        - containerPort: 2279
+          name: client
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        env:
+        - name: INITIAL_CLUSTER_SIZE
+          value: "3"
+        # - name: CLUSTER_NAMESPACE
+        #   valueFrom:
+        #     fieldRef:
+        #       fieldPath: metadata.namespace
+        - name: ETCDAPI_VERSION
+          value: "3"
+        - name: SET_NAME
+          value: "etcd"
+        - name: GOMAXPROCS
+          value: "2"
+        livenessProbe:      
+          failureThreshold: 3
+          httpGet:
+            path: /health     
+            port: 2279               
+            scheme: HTTP
+          initialDelaySeconds: 40
+          periodSeconds: 10
+          successThreshold: 1           
+          timeoutSeconds: 5 
+        volumeMounts:
+        - mountPath: /var/run/etcd
+          name: datadir
+        - mountPath: /etc/localtime
+          name: volume-localtime
+        command:
+        - /bin/sh
+        - -ec
+        - |
+          HOSTNAME=$(hostname)
+          echo "etcd api version is ${ETCDAPI_VERSION}"
+
+          eps() {
+              EPS=""
+              for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                  EPS="${EPS}${EPS:+,}http://${SET_NAME}-${i}.${SET_NAME}:2279"
+              done
+              echo ${EPS}
+          }
+
+          member_hash() {
+              etcdctl member list | grep http://${HOSTNAME}.${SET_NAME}:2280 | cut -d':' -f1 | cut -d'[' -f1
+          }
+
+          # etcd-SET_ID
+          SET_ID=${HOSTNAME##*-}
+          # adding a new member to existing cluster (assuming all initial pods are available)
+          if [ "${SET_ID}" -ge ${INITIAL_CLUSTER_SIZE} ]; then
+              export ETCDCTL_ENDPOINTS=$(eps)
+
+              # member already added?
+              MEMBER_HASH=$(member_hash)
+              if [ -n "${MEMBER_HASH}" ]; then
+                  # the member hash exists but for some reason etcd failed
+                  # as the datadir has not be created, we can remove the member
+                  # and retrieve new hash
+                  if [ "${ETCDAPI_VERSION}" -eq 3 ]; then
+                      ETCDCTL_API=3 etcdctl  member remove ${MEMBER_HASH}
+                  else
+                      etcdctl member remove ${MEMBER_HASH}
+                  fi
+                  
+              fi
+              echo "Adding new member"
+              rm -rf /var/run/etcd/*
+              # ensure etcd dir exist
+              mkdir -p /var/run/etcd/
+              # sleep 60s wait endpoint become ready
+              echo "sleep 30s wait endpoint become ready,sleeping..."
+              sleep 30
+
+              if [ "${ETCDAPI_VERSION}" -eq 3 ]; then
+                  ETCDCTL_API=3 etcdctl  member add ${HOSTNAME} --peer-urls=http://${HOSTNAME}.${SET_NAME}:2280 | grep "^ETCD_" > /var/run/etcd/new_member_envs
+              else
+                  etcdctl member add ${HOSTNAME} http://${HOSTNAME}.${SET_NAME}:2280 | grep "^ETCD_" > /var/run/etcd/new_member_envs
+              fi
+
+              if [ $? -ne 0 ]; then
+                  echo "member add ${HOSTNAME} error."
+                  rm -f /var/run/etcd/new_member_envs
+                  exit 1
+              fi
+              cat /var/run/etcd/new_member_envs
+              source /var/run/etcd/new_member_envs
+
+              exec etcd --name ${HOSTNAME} \
+                  --listen-peer-urls http://0.0.0.0:2280 \
+                  --listen-client-urls http://0.0.0.0:2279\
+                  --advertise-client-urls http://${HOSTNAME}.${SET_NAME}:2279\
+                  --initial-advertise-peer-urls http://${HOSTNAME}.${SET_NAME}:2280 \
+                  --data-dir /var/run/etcd/default.etcd \
+                  --initial-cluster ${ETCD_INITIAL_CLUSTER} \
+                  --initial-cluster-state ${ETCD_INITIAL_CLUSTER_STATE}
+          fi
+          for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+              while true; do
+                  echo "Waiting for ${SET_NAME}-${i}.${SET_NAME} to come up"
+                  ping -W 1 -c 1 ${SET_NAME}-${i}.${SET_NAME} > /dev/null && break
+                  sleep 1s
+              done
+          done
+
+          echo "join member ${HOSTNAME}"
+          initial_peers() {
+                PEERS=""
+                for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                PEERS="${PEERS}${PEERS:+,}${SET_NAME}-${i}=http://${SET_NAME}-${i}.${SET_NAME}:2280"
+                done
+                echo ${PEERS}
+          }
+          # join member
+          exec etcd --name ${HOSTNAME} \
+              --listen-peer-urls http://0.0.0.0:2280 \
+              --listen-client-urls http://0.0.0.0:2279\
+              --initial-advertise-peer-urls http://${HOSTNAME}.${SET_NAME}:2280 \
+              --advertise-client-urls http://${HOSTNAME}.${SET_NAME}:2279\
+              --initial-cluster-token etcd \
+              --initial-cluster $(initial_peers) \
+              --initial-cluster-state new \
+              --data-dir /var/run/etcd/default.etcd 
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -ec
+              - |
+                HOSTNAME=$(hostname)
+
+                member_hash() {
+                    etcdctl member list | grep http://${HOSTNAME}.${SET_NAME}:2280 | cut -d':' -f1 | cut -d'[' -f1
+                }
+
+                eps() {
+                    EPS=""
+                    for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                        EPS="${EPS}${EPS:+,}http://${SET_NAME}-${i}.${SET_NAME}:2279"
+                    done
+                    echo ${EPS}
+                }
+
+                export ETCDCTL_ENDPOINTS=$(eps)
+
+                SET_ID=${HOSTNAME##*-}
+                # Removing member from cluster
+                if [ "${SET_ID}" -ge ${INITIAL_CLUSTER_SIZE} ]; then
+                    echo "Removing ${HOSTNAME} from etcd cluster"
+                    if [ "${ETCDAPI_VERSION}" -eq 3 ]; then
+                        ETCDCTL_API=3 etcdctl member remove $(member_hash)
+                    else
+                        etcdctl member remove $(member_hash)
+                    fi
+                    if [ $? -eq 0 ]; then
+                        # Remove everything otherwise the cluster will no longer scale-up
+                        rm -rf /var/run/etcd/*
+                    fi
+                fi
+      imagePullSecrets:
+      - name: portal-prod-docker-image-registry-vpc.cn-beijing.cr.aliyuncs.com
+      volumes:
+        - hostPath:
+            path: /etc/localtime
+            type: ''
+          name: volume-localtime
+  updateStrategy:
+    type: OnDelete
+  volumeClaimTemplates:
+  - metadata:
+      name: datadir
+    spec:
+      accessModes:
+        - "ReadWriteOnce"
+      storageClassName: alicloud-nas-subpath
+      resources:
+        requests:
+          # upstream recommended max is 700M
+          storage: 10Gi
